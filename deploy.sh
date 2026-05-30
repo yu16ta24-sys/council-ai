@@ -13,6 +13,15 @@ MIN_FREE_KB=200000
 
 CURRENT_STEP="start"
 DEPLOY_STATUS="running"
+OLD_COMMIT=""
+NEW_COMMIT=""
+OLD_VERSION=""
+MAINTENANCE_STATUS="not_started"
+GIT_ROLLBACK_STATUS="not_attempted"
+COMPOSER_RECOVERY_STATUS="not_needed"
+DB_RESTORE_STATUS="not_implemented"
+MAINTENANCE_RECOVERY_STATUS="not_attempted"
+
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOG_FILE="$LOG_DIR/deploy_${TIMESTAMP}.log"
 DIAG_FILE="$DIAG_DIR/deploy_failed_${TIMESTAMP}.txt"
@@ -40,6 +49,18 @@ make_diagnostics() {
     echo "deploy_log: $LOG_FILE"
     echo ""
 
+    echo "Recovery result"
+    echo "--------------------------------"
+    echo "old_commit: $OLD_COMMIT"
+    echo "new_commit: $NEW_COMMIT"
+    echo "old_version: $OLD_VERSION"
+    echo "maintenance_status: $MAINTENANCE_STATUS"
+    echo "git_rollback_status: $GIT_ROLLBACK_STATUS"
+    echo "composer_recovery_status: $COMPOSER_RECOVERY_STATUS"
+    echo "db_restore_status: $DB_RESTORE_STATUS"
+    echo "maintenance_recovery_status: $MAINTENANCE_RECOVERY_STATUS"
+    echo ""
+
     echo "VERSION"
     echo "--------------------------------"
     if [ -f "$APP_DIR/VERSION" ]; then
@@ -64,6 +85,15 @@ make_diagnostics() {
     cd "$APP_DIR" && git log -1 --oneline 2>&1
     echo ""
 
+    echo "Maintenance file"
+    echo "--------------------------------"
+    if [ -f "$APP_DIR/storage/framework/down" ]; then
+      echo "storage/framework/down exists"
+    else
+      echo "storage/framework/down not found"
+    fi
+    echo ""
+
     echo "Migration status"
     echo "--------------------------------"
     cd "$APP_DIR" && php artisan migrate:status 2>&1
@@ -81,7 +111,7 @@ make_diagnostics() {
 
     echo "Last deploy log tail"
     echo "--------------------------------"
-    tail -n 120 "$LOG_FILE" 2>&1
+    tail -n 160 "$LOG_FILE" 2>&1
   } > "$DIAG_FILE"
 
   echo ""
@@ -90,9 +120,58 @@ make_diagnostics() {
   echo "$DIAG_FILE"
 }
 
+recover_on_error() {
+  set +e
+
+  echo "================================"
+  echo "Recovery started"
+  echo "================================"
+
+  cd "$APP_DIR"
+
+  if [ -n "$OLD_COMMIT" ]; then
+    echo "[R1] Reset to old commit: $OLD_COMMIT"
+    git reset --hard "$OLD_COMMIT"
+    if [ $? -eq 0 ]; then
+      GIT_ROLLBACK_STATUS="success"
+    else
+      GIT_ROLLBACK_STATUS="failed"
+    fi
+  else
+    echo "[R1] OLD_COMMIT is empty. Skipping git rollback."
+    GIT_ROLLBACK_STATUS="skipped_no_old_commit"
+  fi
+
+  echo "[R2] Composer recovery"
+  COMPOSER_RECOVERY_STATUS="not_needed_currently"
+
+  echo "[R3] DB restore"
+  DB_RESTORE_STATUS="not_implemented_in_v0.1.8"
+
+  echo "[R4] Bring app up"
+  php artisan up
+  if [ $? -eq 0 ]; then
+    MAINTENANCE_RECOVERY_STATUS="artisan_up_success"
+  else
+    echo "php artisan up failed. Removing maintenance file directly."
+    rm -f "$APP_DIR/storage/framework/down"
+    if [ ! -f "$APP_DIR/storage/framework/down" ]; then
+      MAINTENANCE_RECOVERY_STATUS="direct_file_remove_success"
+    else
+      MAINTENANCE_RECOVERY_STATUS="direct_file_remove_failed"
+    fi
+  fi
+
+  echo "================================"
+  echo "Recovery finished"
+  echo "================================"
+}
+
 on_error() {
   EXIT_CODE=$?
+  trap - ERR
   DEPLOY_STATUS="failed"
+  recover_on_error
   make_diagnostics
   exit $EXIT_CODE
 }
@@ -106,18 +185,29 @@ if ! flock -n 9; then
 fi
 
 echo "================================"
-echo "Council AI Deploy - v0.1.7"
+echo "Council AI Deploy - v0.1.8"
 echo "Log: $LOG_FILE"
 echo "================================"
 
 cd "$APP_DIR"
 
+CURRENT_STEP="capture_old_state"
+echo "[1/12] Capture old state"
+OLD_COMMIT=$(git rev-parse HEAD)
+if [ -f VERSION ]; then
+  OLD_VERSION=$(cat VERSION)
+else
+  OLD_VERSION="VERSION file not found"
+fi
+echo "OLD_COMMIT: $OLD_COMMIT"
+echo "OLD_VERSION: $OLD_VERSION"
+
 CURRENT_STEP="current_status"
-echo "[1/10] Current status"
+echo "[2/12] Current status"
 git status --short
 
 CURRENT_STEP="check_disk_space"
-echo "[2/10] Check disk space"
+echo "[3/12] Check disk space"
 FREE_KB=$(df -Pk "$APP_DIR" | awk 'NR==2 {print $4}')
 echo "Free disk space: ${FREE_KB} KB"
 
@@ -128,30 +218,34 @@ if [ "$FREE_KB" -lt "$MIN_FREE_KB" ]; then
   exit 1
 fi
 
+CURRENT_STEP="enable_maintenance_mode"
+echo "[4/12] Enable maintenance mode"
+php artisan down
+MAINTENANCE_STATUS="enabled"
+
 CURRENT_STEP="prepare_backup_folder"
-echo "[3/10] Prepare DB backup folder"
+echo "[5/12] Prepare DB backup folder"
 mkdir -p "$BACKUP_DIR"
 
 BACKUP_FILE="$BACKUP_DIR/council_ai_${TIMESTAMP}.sql"
 
 CURRENT_STEP="create_db_backup"
-echo "[4/10] Create DB backup"
+echo "[6/12] Create DB backup"
 set -a
 source .env
 set +a
 
-mysqldump \
+MYSQL_PWD="${DB_PASSWORD}" mysqldump \
   --no-tablespaces \
   --host="${DB_HOST:-127.0.0.1}" \
   --port="${DB_PORT:-3306}" \
   --user="${DB_USERNAME}" \
-  --password="${DB_PASSWORD}" \
   "${DB_DATABASE}" > "$BACKUP_FILE"
 
 echo "Backup file: $BACKUP_FILE"
 
 CURRENT_STEP="validate_db_backup"
-echo "[5/10] Validate DB backup"
+echo "[7/12] Validate DB backup"
 if [ ! -f "$BACKUP_FILE" ]; then
   echo "ERROR: Backup file was not created."
   exit 1
@@ -170,28 +264,32 @@ fi
 echo "DB backup validation: OK"
 
 CURRENT_STEP="rotate_backups"
-echo "[6/10] Rotate DB backups"
+echo "[8/12] Rotate DB backups"
 find "$BACKUP_DIR" -type f -name "council_ai_*.sql" | sort -r | tail -n +$((BACKUP_KEEP + 1)) | xargs -r rm -f
 
 CURRENT_STEP="fetch_origin"
-echo "[7/10] Fetch latest from GitHub"
+echo "[9/12] Fetch latest from GitHub"
 git fetch origin
 
 CURRENT_STEP="reset_to_origin"
-echo "[8/10] Reset hard to origin/$BRANCH"
+echo "[10/12] Reset hard to origin/$BRANCH"
 git reset --hard "origin/$BRANCH"
+NEW_COMMIT=$(git rev-parse HEAD)
 
 CURRENT_STEP="clear_cache"
-echo "[9/10] Clear Laravel cache"
+echo "[11/12] Clear Laravel cache"
 php artisan optimize:clear
 
-CURRENT_STEP="show_version"
-echo "[10/10] Show version"
+CURRENT_STEP="show_version_and_up"
+echo "[12/12] Show version and bring app up"
 if [ -f VERSION ]; then
   echo "VERSION: $(cat VERSION)"
 else
   echo "VERSION file not found"
 fi
+
+php artisan up
+MAINTENANCE_STATUS="disabled"
 
 CURRENT_STEP="rotate_diagnostics"
 find "$DIAG_DIR" -type f -name "deploy_failed_*.txt" -mtime +"$DIAG_KEEP_DAYS" -delete 2>/dev/null || true
