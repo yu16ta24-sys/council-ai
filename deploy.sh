@@ -19,8 +19,12 @@ OLD_VERSION=""
 MAINTENANCE_STATUS="not_started"
 GIT_ROLLBACK_STATUS="not_attempted"
 COMPOSER_RECOVERY_STATUS="not_needed"
-DB_RESTORE_STATUS="not_implemented"
+DB_BACKUP_STATUS="not_started"
+DB_BACKUP_VALID="false"
+DB_BACKUP_FILE=""
+DB_RESTORE_STATUS="not_attempted"
 MAINTENANCE_RECOVERY_STATUS="not_attempted"
+SKIP_APP_UP="false"
 
 TIMESTAMP=$(date +"%Y%m%d_%H%M%S")
 LOG_FILE="$LOG_DIR/deploy_${TIMESTAMP}.log"
@@ -57,7 +61,11 @@ make_diagnostics() {
     echo "maintenance_status: $MAINTENANCE_STATUS"
     echo "git_rollback_status: $GIT_ROLLBACK_STATUS"
     echo "composer_recovery_status: $COMPOSER_RECOVERY_STATUS"
+    echo "db_backup_status: $DB_BACKUP_STATUS"
+    echo "db_backup_valid: $DB_BACKUP_VALID"
+    echo "db_backup_file: $DB_BACKUP_FILE"
     echo "db_restore_status: $DB_RESTORE_STATUS"
+    echo "skip_app_up: $SKIP_APP_UP"
     echo "maintenance_recovery_status: $MAINTENANCE_RECOVERY_STATUS"
     echo ""
 
@@ -111,13 +119,52 @@ make_diagnostics() {
 
     echo "Last deploy log tail"
     echo "--------------------------------"
-    tail -n 160 "$LOG_FILE" 2>&1
+    tail -n 200 "$LOG_FILE" 2>&1
   } > "$DIAG_FILE"
 
   echo ""
   echo "ERROR: Deploy failed."
   echo "Please send this diagnostics file to Zippy/Claude:"
   echo "$DIAG_FILE"
+}
+
+restore_database_if_safe() {
+  set +e
+
+  if [ "$DB_BACKUP_VALID" != "true" ]; then
+    echo "[R3] DB restore skipped: no verified backup."
+    DB_RESTORE_STATUS="skipped_no_verified_backup"
+    return 0
+  fi
+
+  if [ ! -f "$DB_BACKUP_FILE" ]; then
+    echo "[R3] DB restore failed: backup file missing."
+    DB_RESTORE_STATUS="failed_backup_missing"
+    SKIP_APP_UP="true"
+    return 1
+  fi
+
+  echo "[R3] Restore DB from verified backup:"
+  echo "$DB_BACKUP_FILE"
+
+  set -a
+  source "$APP_DIR/.env"
+  set +a
+
+  MYSQL_PWD="${DB_PASSWORD}" mysql \
+    --host="${DB_HOST:-127.0.0.1}" \
+    --port="${DB_PORT:-3306}" \
+    --user="${DB_USERNAME}" \
+    "${DB_DATABASE}" < "$DB_BACKUP_FILE"
+
+  if [ $? -eq 0 ]; then
+    DB_RESTORE_STATUS="success"
+    return 0
+  else
+    DB_RESTORE_STATUS="failed"
+    SKIP_APP_UP="true"
+    return 1
+  fi
 }
 
 recover_on_error() {
@@ -145,20 +192,24 @@ recover_on_error() {
   echo "[R2] Composer recovery"
   COMPOSER_RECOVERY_STATUS="not_needed_currently"
 
-  echo "[R3] DB restore"
-  DB_RESTORE_STATUS="not_implemented_in_v0.1.8"
+  restore_database_if_safe
 
-  echo "[R4] Bring app up"
-  php artisan up
-  if [ $? -eq 0 ]; then
-    MAINTENANCE_RECOVERY_STATUS="artisan_up_success"
+  if [ "$SKIP_APP_UP" = "true" ]; then
+    echo "[R4] App will NOT be brought up because DB restore did not cleanly succeed."
+    MAINTENANCE_RECOVERY_STATUS="skipped_due_to_db_restore_failure"
   else
-    echo "php artisan up failed. Removing maintenance file directly."
-    rm -f "$APP_DIR/storage/framework/down"
-    if [ ! -f "$APP_DIR/storage/framework/down" ]; then
-      MAINTENANCE_RECOVERY_STATUS="direct_file_remove_success"
+    echo "[R4] Bring app up"
+    php artisan up
+    if [ $? -eq 0 ]; then
+      MAINTENANCE_RECOVERY_STATUS="artisan_up_success"
     else
-      MAINTENANCE_RECOVERY_STATUS="direct_file_remove_failed"
+      echo "php artisan up failed. Removing maintenance file directly."
+      rm -f "$APP_DIR/storage/framework/down"
+      if [ ! -f "$APP_DIR/storage/framework/down" ]; then
+        MAINTENANCE_RECOVERY_STATUS="direct_file_remove_success"
+      else
+        MAINTENANCE_RECOVERY_STATUS="direct_file_remove_failed"
+      fi
     fi
   fi
 
@@ -185,7 +236,7 @@ if ! flock -n 9; then
 fi
 
 echo "================================"
-echo "Council AI Deploy - v0.1.8"
+echo "Council AI Deploy - v0.1.9"
 echo "Log: $LOG_FILE"
 echo "================================"
 
@@ -228,6 +279,7 @@ echo "[5/12] Prepare DB backup folder"
 mkdir -p "$BACKUP_DIR"
 
 BACKUP_FILE="$BACKUP_DIR/council_ai_${TIMESTAMP}.sql"
+DB_BACKUP_FILE="$BACKUP_FILE"
 
 CURRENT_STEP="create_db_backup"
 echo "[6/12] Create DB backup"
@@ -242,25 +294,31 @@ MYSQL_PWD="${DB_PASSWORD}" mysqldump \
   --user="${DB_USERNAME}" \
   "${DB_DATABASE}" > "$BACKUP_FILE"
 
+DB_BACKUP_STATUS="created"
 echo "Backup file: $BACKUP_FILE"
 
 CURRENT_STEP="validate_db_backup"
 echo "[7/12] Validate DB backup"
 if [ ! -f "$BACKUP_FILE" ]; then
   echo "ERROR: Backup file was not created."
+  DB_BACKUP_STATUS="missing"
   exit 1
 fi
 
 if [ ! -s "$BACKUP_FILE" ]; then
   echo "ERROR: Backup file is empty."
+  DB_BACKUP_STATUS="empty"
   exit 1
 fi
 
 if ! tail -n 5 "$BACKUP_FILE" | grep -q "Dump completed"; then
   echo "ERROR: Backup completion marker was not found."
+  DB_BACKUP_STATUS="invalid_no_completion_marker"
   exit 1
 fi
 
+DB_BACKUP_VALID="true"
+DB_BACKUP_STATUS="verified"
 echo "DB backup validation: OK"
 
 CURRENT_STEP="rotate_backups"
