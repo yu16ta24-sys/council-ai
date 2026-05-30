@@ -7,6 +7,7 @@ set SERVER_HOST=160.251.207.11
 set APP_DIR=/var/www/council-ai
 set TEMP_DIR=%TEMP%\council_ai_update_work
 set DELETE_BACKUP_DIR=%TEMP%\council_ai_delete_backup
+set SELF_UPDATE=false
 
 echo ========================================
 echo Council AI Release Launcher
@@ -201,6 +202,9 @@ if /I not "%CONFIRM%"=="Y" (
 if "%MODE%"=="2" goto DEPLOY_ONLY
 
 echo.
+if exist "%TEMP_DIR%\release_council_ai.bat" (
+  set SELF_UPDATE=true
+)
 echo [5/10] Processing delete instructions...
 
 powershell -NoProfile -ExecutionPolicy Bypass -Command ^
@@ -274,6 +278,21 @@ if %ERRORLEVEL% NEQ 0 (
   echo ERROR: git push failed.
   pause
   exit /b 1
+)
+if /I "%SELF_UPDATE%"=="true" (
+  echo.
+  echo ========================================
+  echo IMPORTANT: release_council_ai.bat was updated.
+  echo ========================================
+  echo The launcher updated itself.
+  echo To avoid running a modified batch file in the same process,
+  echo server deploy will NOT continue automatically.
+  echo.
+  echo Please close this window, then run release_council_ai.bat again
+  echo without a ZIP to deploy the latest GitHub version to the server.
+  echo ========================================
+  pause
+  exit /b 0
 )
 
 if "%MODE%"=="1" (
