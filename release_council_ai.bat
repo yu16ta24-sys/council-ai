@@ -106,6 +106,10 @@ for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "(Get-Content 
 for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "(Get-Content '%TEMP_DIR%\UPDATE_MANIFEST.json' -Raw | ConvertFrom-Json).version"`) do set UPDATE_VERSION=%%A
 for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "(Get-Content '%TEMP_DIR%\UPDATE_MANIFEST.json' -Raw | ConvertFrom-Json).from_version"`) do set FROM_VERSION=%%A
 for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "(Get-Content '%TEMP_DIR%\UPDATE_MANIFEST.json' -Raw | ConvertFrom-Json).summary"`) do set SUMMARY=%%A
+for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "(Get-Content '%TEMP_DIR%\UPDATE_MANIFEST.json' -Raw | ConvertFrom-Json).requires_migration"`) do set REQUIRES_MIGRATION=%%A
+for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "(Get-Content '%TEMP_DIR%\UPDATE_MANIFEST.json' -Raw | ConvertFrom-Json).requires_composer"`) do set REQUIRES_COMPOSER=%%A
+for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "(Get-Content '%TEMP_DIR%\UPDATE_MANIFEST.json' -Raw | ConvertFrom-Json).migration_destructive"`) do set MIGRATION_DESTRUCTIVE=%%A
+for /f "usebackq delims=" %%A in (`powershell -NoProfile -Command "(Get-Content '%TEMP_DIR%\UPDATE_MANIFEST.json' -Raw | ConvertFrom-Json).requires_claude_audit"`) do set REQUIRES_CLAUDE_AUDIT=%%A
 
 if /I not "%APP_ID%"=="council-ai" (
   echo ERROR: app_id is not council-ai.
@@ -142,7 +146,30 @@ echo App ID: %APP_ID%
 echo From version: %FROM_VERSION%
 echo To version: %UPDATE_VERSION%
 echo Summary: %SUMMARY%
+echo Requires migration: %REQUIRES_MIGRATION%
+echo Requires composer: %REQUIRES_COMPOSER%
+echo Migration destructive: %MIGRATION_DESTRUCTIVE%
+echo Requires Claude audit: %REQUIRES_CLAUDE_AUDIT%
 echo ========================================
+echo.
+
+if /I "%REQUIRES_MIGRATION%"=="True" (
+  echo WARNING: This update requires database migration.
+)
+
+if /I "%REQUIRES_COMPOSER%"=="True" (
+  echo WARNING: This update may run composer install.
+)
+
+if /I "%MIGRATION_DESTRUCTIVE%"=="True" (
+  echo DANGER: This update is marked as destructive migration.
+  echo DANGER: Claude audit should be completed before running.
+)
+
+if /I "%REQUIRES_CLAUDE_AUDIT%"=="True" (
+  echo WARNING: This update is marked as requiring Claude audit.
+)
+
 echo.
 
 echo Delete targets:
