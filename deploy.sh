@@ -18,6 +18,8 @@ NEW_COMMIT=""
 OLD_VERSION=""
 MAINTENANCE_STATUS="not_started"
 GIT_ROLLBACK_STATUS="not_attempted"
+COMPOSER_CHANGED="false"
+COMPOSER_INSTALL_STATUS="not_run"
 COMPOSER_RECOVERY_STATUS="not_needed"
 DB_BACKUP_STATUS="not_started"
 DB_BACKUP_VALID="false"
@@ -60,6 +62,8 @@ make_diagnostics() {
     echo "old_version: $OLD_VERSION"
     echo "maintenance_status: $MAINTENANCE_STATUS"
     echo "git_rollback_status: $GIT_ROLLBACK_STATUS"
+    echo "composer_changed: $COMPOSER_CHANGED"
+    echo "composer_install_status: $COMPOSER_INSTALL_STATUS"
     echo "composer_recovery_status: $COMPOSER_RECOVERY_STATUS"
     echo "db_backup_status: $DB_BACKUP_STATUS"
     echo "db_backup_valid: $DB_BACKUP_VALID"
@@ -93,6 +97,11 @@ make_diagnostics() {
     cd "$APP_DIR" && git log -1 --oneline 2>&1
     echo ""
 
+    echo "Composer version"
+    echo "--------------------------------"
+    composer --version 2>&1
+    echo ""
+
     echo "Maintenance file"
     echo "--------------------------------"
     if [ -f "$APP_DIR/storage/framework/down" ]; then
@@ -119,7 +128,7 @@ make_diagnostics() {
 
     echo "Last deploy log tail"
     echo "--------------------------------"
-    tail -n 200 "$LOG_FILE" 2>&1
+    tail -n 220 "$LOG_FILE" 2>&1
   } > "$DIAG_FILE"
 
   echo ""
@@ -167,6 +176,10 @@ restore_database_if_safe() {
   fi
 }
 
+run_composer_install() {
+  composer install --no-dev --no-interaction --prefer-dist --optimize-autoloader
+}
+
 recover_on_error() {
   set +e
 
@@ -190,13 +203,24 @@ recover_on_error() {
   fi
 
   echo "[R2] Composer recovery"
-  COMPOSER_RECOVERY_STATUS="not_needed_currently"
+  if [ "$COMPOSER_CHANGED" = "true" ] || [ "$COMPOSER_INSTALL_STATUS" = "success" ]; then
+    echo "Composer files changed or composer install ran. Reinstalling from rolled-back composer.lock..."
+    run_composer_install
+    if [ $? -eq 0 ]; then
+      COMPOSER_RECOVERY_STATUS="success"
+    else
+      COMPOSER_RECOVERY_STATUS="failed"
+      SKIP_APP_UP="true"
+    fi
+  else
+    COMPOSER_RECOVERY_STATUS="not_needed"
+  fi
 
   restore_database_if_safe
 
   if [ "$SKIP_APP_UP" = "true" ]; then
-    echo "[R4] App will NOT be brought up because DB restore did not cleanly succeed."
-    MAINTENANCE_RECOVERY_STATUS="skipped_due_to_db_restore_failure"
+    echo "[R4] App will NOT be brought up because recovery did not cleanly succeed."
+    MAINTENANCE_RECOVERY_STATUS="skipped_due_to_recovery_failure"
   else
     echo "[R4] Bring app up"
     php artisan up
@@ -236,14 +260,14 @@ if ! flock -n 9; then
 fi
 
 echo "================================"
-echo "Council AI Deploy - v0.1.9"
+echo "Council AI Deploy - v0.1.10"
 echo "Log: $LOG_FILE"
 echo "================================"
 
 cd "$APP_DIR"
 
 CURRENT_STEP="capture_old_state"
-echo "[1/12] Capture old state"
+echo "[1/14] Capture old state"
 OLD_COMMIT=$(git rev-parse HEAD)
 if [ -f VERSION ]; then
   OLD_VERSION=$(cat VERSION)
@@ -254,11 +278,11 @@ echo "OLD_COMMIT: $OLD_COMMIT"
 echo "OLD_VERSION: $OLD_VERSION"
 
 CURRENT_STEP="current_status"
-echo "[2/12] Current status"
+echo "[2/14] Current status"
 git status --short
 
 CURRENT_STEP="check_disk_space"
-echo "[3/12] Check disk space"
+echo "[3/14] Check disk space"
 FREE_KB=$(df -Pk "$APP_DIR" | awk 'NR==2 {print $4}')
 echo "Free disk space: ${FREE_KB} KB"
 
@@ -270,19 +294,19 @@ if [ "$FREE_KB" -lt "$MIN_FREE_KB" ]; then
 fi
 
 CURRENT_STEP="enable_maintenance_mode"
-echo "[4/12] Enable maintenance mode"
+echo "[4/14] Enable maintenance mode"
 php artisan down
 MAINTENANCE_STATUS="enabled"
 
 CURRENT_STEP="prepare_backup_folder"
-echo "[5/12] Prepare DB backup folder"
+echo "[5/14] Prepare DB backup folder"
 mkdir -p "$BACKUP_DIR"
 
 BACKUP_FILE="$BACKUP_DIR/council_ai_${TIMESTAMP}.sql"
 DB_BACKUP_FILE="$BACKUP_FILE"
 
 CURRENT_STEP="create_db_backup"
-echo "[6/12] Create DB backup"
+echo "[6/14] Create DB backup"
 set -a
 source .env
 set +a
@@ -298,7 +322,7 @@ DB_BACKUP_STATUS="created"
 echo "Backup file: $BACKUP_FILE"
 
 CURRENT_STEP="validate_db_backup"
-echo "[7/12] Validate DB backup"
+echo "[7/14] Validate DB backup"
 if [ ! -f "$BACKUP_FILE" ]; then
   echo "ERROR: Backup file was not created."
   DB_BACKUP_STATUS="missing"
@@ -322,24 +346,43 @@ DB_BACKUP_STATUS="verified"
 echo "DB backup validation: OK"
 
 CURRENT_STEP="rotate_backups"
-echo "[8/12] Rotate DB backups"
+echo "[8/14] Rotate DB backups"
 find "$BACKUP_DIR" -type f -name "council_ai_*.sql" | sort -r | tail -n +$((BACKUP_KEEP + 1)) | xargs -r rm -f
 
 CURRENT_STEP="fetch_origin"
-echo "[9/12] Fetch latest from GitHub"
+echo "[9/14] Fetch latest from GitHub"
 git fetch origin
 
+CURRENT_STEP="detect_composer_changes"
+echo "[10/14] Detect composer changes"
+if git diff --name-only HEAD "origin/$BRANCH" | grep -E '^(composer\.json|composer\.lock)$' >/dev/null; then
+  COMPOSER_CHANGED="true"
+else
+  COMPOSER_CHANGED="false"
+fi
+echo "COMPOSER_CHANGED: $COMPOSER_CHANGED"
+
 CURRENT_STEP="reset_to_origin"
-echo "[10/12] Reset hard to origin/$BRANCH"
+echo "[11/14] Reset hard to origin/$BRANCH"
 git reset --hard "origin/$BRANCH"
 NEW_COMMIT=$(git rev-parse HEAD)
 
+CURRENT_STEP="composer_install"
+echo "[12/14] Composer install if needed"
+if [ "$COMPOSER_CHANGED" = "true" ]; then
+  run_composer_install
+  COMPOSER_INSTALL_STATUS="success"
+else
+  echo "Composer install skipped."
+  COMPOSER_INSTALL_STATUS="skipped_no_changes"
+fi
+
 CURRENT_STEP="clear_cache"
-echo "[11/12] Clear Laravel cache"
+echo "[13/14] Clear Laravel cache"
 php artisan optimize:clear
 
 CURRENT_STEP="show_version_and_up"
-echo "[12/12] Show version and bring app up"
+echo "[14/14] Show version and bring app up"
 if [ -f VERSION ]; then
   echo "VERSION: $(cat VERSION)"
 else
