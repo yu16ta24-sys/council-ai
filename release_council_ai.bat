@@ -32,11 +32,11 @@ if /I not "%ZIP_FILE:~-4%"==".zip" (
   exit /b 1
 )
 
-echo [1/7] Cleaning temp folder...
+echo [1/9] Cleaning temp folder...
 if exist "%TEMP_DIR%" rmdir /s /q "%TEMP_DIR%"
 mkdir "%TEMP_DIR%"
 
-echo [2/7] Extracting ZIP...
+echo [2/9] Extracting ZIP...
 powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -LiteralPath '%ZIP_FILE%' -DestinationPath '%TEMP_DIR%' -Force"
 if %ERRORLEVEL% NEQ 0 (
   echo ERROR: Failed to extract ZIP.
@@ -58,10 +58,42 @@ if not exist "%TEMP_DIR%\.council-ai-update" (
   exit /b 1
 )
 
-echo [3/7] Checking update marker...
+echo [3/9] Checking update marker...
 findstr /C:"COUNCIL_AI_UPDATE_PACKAGE" "%TEMP_DIR%\.council-ai-update" >nul
 if %ERRORLEVEL% NEQ 0 (
   echo ERROR: Invalid .council-ai-update marker.
+  pause
+  exit /b 1
+)
+
+echo [4/9] Checking dangerous files and paths...
+
+powershell -NoProfile -ExecutionPolicy Bypass -Command ^
+  "$root='%TEMP_DIR%';" ^
+  "$bad=@();" ^
+  "$items=Get-ChildItem -LiteralPath $root -Recurse -Force;" ^
+  "foreach($i in $items){" ^
+  "  $rel=$i.FullName.Substring($root.Length).TrimStart('\','/');" ^
+  "  $rel2=$rel -replace '\\','/';" ^
+  "  if($rel2 -match '(^|/)\.env$'){$bad+=$rel2};" ^
+  "  if($rel2 -match '(^|/)\.git(/|$)'){$bad+=$rel2};" ^
+  "  if($rel2 -match '(^|/)vendor(/|$)'){$bad+=$rel2};" ^
+  "  if($rel2 -match '(^|/)node_modules(/|$)'){$bad+=$rel2};" ^
+  "  if($rel2 -match '(^|/)storage/logs(/|$)'){$bad+=$rel2};" ^
+  "  if($rel2 -match '(^|/)bootstrap/cache(/|$)'){$bad+=$rel2};" ^
+  "  if($rel2 -match '\.\.'){$bad+=$rel2};" ^
+  "  if($rel2 -match '^[A-Za-z]:'){$bad+=$rel2};" ^
+  "  if($rel2 -match '^/var/'){$bad+=$rel2};" ^
+  "}" ^
+  "if($bad.Count -gt 0){" ^
+  "  Write-Host 'ERROR: Dangerous files or paths were found:';" ^
+  "  $bad | Sort-Object -Unique | ForEach-Object { Write-Host ('- ' + $_) };" ^
+  "  exit 1;" ^
+  "}"
+
+if %ERRORLEVEL% NEQ 0 (
+  echo.
+  echo Update package rejected.
   pause
   exit /b 1
 )
@@ -134,7 +166,7 @@ if /I not "%CONFIRM%"=="Y" (
 if "%MODE%"=="2" goto DEPLOY_ONLY
 
 echo.
-echo [4/7] Applying files to local repo...
+echo [5/9] Applying files to local repo...
 
 robocopy "%TEMP_DIR%" "%REPO_DIR%" /E /XD ".git" "vendor" "node_modules" "storage\logs" "bootstrap\cache" /XF ".env" "UPDATE_MANIFEST.json" ".council-ai-update"
 if %ERRORLEVEL% GEQ 8 (
@@ -146,11 +178,11 @@ if %ERRORLEVEL% GEQ 8 (
 cd /d "%REPO_DIR%"
 
 echo.
-echo [5/7] Git status
+echo [6/9] Git status
 git status
 
 echo.
-echo [6/7] Commit and push to GitHub
+echo [7/9] Commit and push to GitHub
 git add .
 git commit -m "Update Council AI to v%UPDATE_VERSION% - %SUMMARY%"
 if %ERRORLEVEL% NEQ 0 (
@@ -174,7 +206,7 @@ if "%MODE%"=="1" (
 
 :DEPLOY_ONLY
 echo.
-echo [7/7] Running server deploy...
+echo [8/9] Running server deploy...
 ssh %SERVER_USER%@%SERVER_HOST% "cd %APP_DIR% && cp deploy.sh /tmp/council_ai_deploy.sh && bash /tmp/council_ai_deploy.sh"
 
 if %ERRORLEVEL% NEQ 0 (
@@ -185,6 +217,7 @@ if %ERRORLEVEL% NEQ 0 (
 )
 
 echo.
+echo [9/9] Done
 echo ========================================
 echo Release completed successfully.
 echo ========================================
