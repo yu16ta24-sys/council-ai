@@ -1,4 +1,15 @@
 @echo off
+if /I "%~1"=="--worker" goto WORKER_START
+
+set "WORKER=%TEMP%\council_ai_release_worker_%RANDOM%%RANDOM%.bat"
+copy /Y "%~f0" "%WORKER%" >nul
+call "%WORKER%" --worker %*
+set "EXITCODE=%ERRORLEVEL%"
+del "%WORKER%" >nul 2>&1
+exit /b %EXITCODE%
+
+:WORKER_START
+shift
 setlocal enabledelayedexpansion
 
 set REPO_DIR=C:\Users\ut\Desktop\council-ai
@@ -320,3 +331,5 @@ echo ========================================
 echo Release completed successfully.
 echo ========================================
 pause
+
+
