@@ -15,7 +15,7 @@ if ! flock -n 9; then
 fi
 
 echo "================================"
-echo "Council AI Deploy - v0.1.5"
+echo "Council AI Deploy - v0.1.6"
 echo "================================"
 
 cd "$APP_DIR"
@@ -46,6 +46,7 @@ source .env
 set +a
 
 mysqldump \
+  --no-tablespaces \
   --host="${DB_HOST:-127.0.0.1}" \
   --port="${DB_PORT:-3306}" \
   --user="${DB_USERNAME}" \
